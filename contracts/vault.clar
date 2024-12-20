@@ -133,3 +133,34 @@
         (asserts! (<= new-fee-rate u100) ERR_INVALID_AMOUNT)
         (var-set protocol-fee-rate new-fee-rate)
         (ok true)))
+
+(define-public (swap
+    (token-in <ft-trait>)
+    (token-out <ft-trait>)
+    (amount-in uint))
+    (begin
+        (asserts! (> amount-in u0) ERR_INVALID_AMOUNT)
+        (let (
+            (pool (unwrap! (get-pool-info (contract-of token-in) (contract-of token-out)) ERR_INVALID_PAIR))
+            (input-reserve (get reserve-x pool))
+            (output-reserve (get reserve-y pool))
+            (output-amount (calculate-swap-output amount-in input-reserve output-reserve)))
+            
+            ;; Verify non-zero output and sufficient reserves
+            (asserts! (and (> output-amount u0) 
+                         (<= output-amount output-reserve)) ERR_INVALID_AMOUNT)
+            
+            ;; Execute transfers
+            (try! (contract-call? token-in transfer 
+                amount-in tx-sender (as-contract tx-sender) none))
+            (try! (as-contract (contract-call? token-out transfer 
+                output-amount (as-contract tx-sender) tx-sender none)))
+            
+            ;; Update pool reserves
+            (map-set liquidity-pools
+                { token-x: (contract-of token-in), token-y: (contract-of token-out) }
+                { reserve-x: (+ input-reserve amount-in),
+                  reserve-y: (- output-reserve output-amount),
+                  total-shares: (get total-shares pool) })
+                
+            (ok output-amount))))
