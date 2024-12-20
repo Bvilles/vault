@@ -1,13 +1,38 @@
 ;; Vault: Bitcoin-Inspired DeFi Protocol
 ;; A decentralized finance protocol focused on savings, swaps, and liquidity pools
 
-(impl-trait 'SP2PABAF9FTAJYNFZH93XENAJ8FVY99RRM50D2JG9.nft-trait.nft-trait)
+;; Define SIP-010 Fungible Token Interface
+(define-trait ft-trait
+    (
+        ;; Transfer from the caller to a new principal
+        (transfer (uint principal principal (optional (buff 34))) (response bool uint))
+
+        ;; Get the token balance of the specified principal
+        (get-balance (principal) (response uint uint))
+
+        ;; Get the current total supply
+        (get-total-supply () (response uint uint))
+
+        ;; Get the token name
+        (get-name () (response (string-ascii 32) uint))
+
+        ;; Get the token symbol
+        (get-symbol () (response (string-ascii 32) uint))
+
+        ;; Get the number of decimals
+        (get-decimals () (response uint uint))
+
+        ;; Get the URI containing token metadata
+        (get-token-uri () (response (optional (string-utf8 256)) uint))
+    )
+)
 
 ;; Constants
 (define-constant CONTRACT_OWNER tx-sender)
 (define-constant ERR_UNAUTHORIZED (err u1001))
 (define-constant ERR_INSUFFICIENT_BALANCE (err u1002))
 (define-constant ERR_INVALID_AMOUNT (err u1003))
+(define-constant ERR_INVALID_PAIR (err u1004))
 
 ;; Data Variables
 (define-data-var total-supply uint u0)
@@ -58,22 +83,23 @@
             ERR_INSUFFICIENT_BALANCE)))
 
 (define-public (add-liquidity 
-    (token-x principal)
-    (token-y principal)
+    (token-x <ft-trait>)
+    (token-y <ft-trait>)
     (amount-x uint)
     (amount-y uint))
-    (let ((pool (get-pool-info token-x token-y))
-          (shares uint))
+    (let (
+        (pool (get-pool-info (contract-of token-x) (contract-of token-y)))
+        (shares u0))
         (if (is-none pool)
             ;; Create new pool
             (begin
-                (try! (contract-call? token-x transfer amount-x tx-sender (as-contract tx-sender)))
-                (try! (contract-call? token-y transfer amount-y tx-sender (as-contract tx-sender)))
+                (try! (contract-call? token-x transfer amount-x tx-sender (as-contract tx-sender) none))
+                (try! (contract-call? token-y transfer amount-y tx-sender (as-contract tx-sender) none))
                 (map-set liquidity-pools
-                    { token-x: token-x, token-y: token-y }
+                    { token-x: (contract-of token-x), token-y: (contract-of token-y) }
                     { reserve-x: amount-x, reserve-y: amount-y, total-shares: amount-x })
                 (map-set user-pool-shares
-                    { user: tx-sender, pool-id: { token-x: token-x, token-y: token-y }}
+                    { user: tx-sender, pool-id: { token-x: (contract-of token-x), token-y: (contract-of token-y) }}
                     amount-x)
                 (ok amount-x))
             ;; Add to existing pool
@@ -84,18 +110,18 @@
                         (<= (* amount-x (get reserve-y pool-data))
                             (* amount-y (get reserve-x pool-data))))
                     (begin
-                        (try! (contract-call? token-x transfer amount-x tx-sender (as-contract tx-sender)))
-                        (try! (contract-call? token-y transfer amount-y tx-sender (as-contract tx-sender)))
+                        (try! (contract-call? token-x transfer amount-x tx-sender (as-contract tx-sender) none))
+                        (try! (contract-call? token-y transfer amount-y tx-sender (as-contract tx-sender) none))
                         (let ((new-shares (/ (* amount-x (get total-shares pool-data))
                                            (get reserve-x pool-data))))
                             (map-set liquidity-pools
-                                { token-x: token-x, token-y: token-y }
+                                { token-x: (contract-of token-x), token-y: (contract-of token-y) }
                                 { reserve-x: (+ (get reserve-x pool-data) amount-x),
                                   reserve-y: (+ (get reserve-y pool-data) amount-y),
                                   total-shares: (+ (get total-shares pool-data) new-shares) })
                             (map-set user-pool-shares
-                                { user: tx-sender, pool-id: { token-x: token-x, token-y: token-y }}
-                                (+ (get-user-pool-shares tx-sender token-x token-y) new-shares))
+                                { user: tx-sender, pool-id: { token-x: (contract-of token-x), token-y: (contract-of token-y) }}
+                                (+ (get-user-pool-shares tx-sender (contract-of token-x) (contract-of token-y)) new-shares))
                             (ok new-shares)))
                     ERR_INVALID_AMOUNT)))))
 
