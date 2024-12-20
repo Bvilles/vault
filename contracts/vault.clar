@@ -164,3 +164,57 @@
                   total-shares: (get total-shares pool) })
                 
             (ok output-amount))))
+
+;; Read-Only Function to get current exchange rate
+(define-read-only (get-exchange-rate
+    (token-x principal)
+    (token-y principal)
+    (amount uint))
+    (let ((pool (get-pool-info token-x token-y)))
+        (match pool
+            pool-data (let (
+                (reserve-x (get reserve-x pool-data))
+                (reserve-y (get reserve-y pool-data)))
+                (ok (/ (* amount reserve-y) (* reserve-x u1000))))
+            ERR_INVALID_PAIR)))
+
+;; Public function to remove liquidity from a pool
+(define-public (remove-liquidity
+    (token-x <ft-trait>)
+    (token-y <ft-trait>)
+    (shares-to-burn uint))
+    (begin
+        (asserts! (> shares-to-burn u0) ERR_INVALID_AMOUNT)
+        (let (
+            (pool (unwrap! (get-pool-info (contract-of token-x) (contract-of token-y)) ERR_INVALID_PAIR))
+            (user-shares (get-user-pool-shares tx-sender (contract-of token-x) (contract-of token-y))))
+            
+            ;; Verify user has sufficient shares
+            (asserts! (>= user-shares shares-to-burn) ERR_INSUFFICIENT_BALANCE)
+            
+            (let (
+                (total-shares (get total-shares pool))
+                (reserve-x (get reserve-x pool))
+                (reserve-y (get reserve-y pool))
+                (amount-x (/ (* shares-to-burn reserve-x) total-shares))
+                (amount-y (/ (* shares-to-burn reserve-y) total-shares)))
+                
+                ;; Update user shares
+                (map-set user-pool-shares
+                    { user: tx-sender, pool-id: { token-x: (contract-of token-x), token-y: (contract-of token-y) }}
+                    (- user-shares shares-to-burn))
+                
+                ;; Update pool data
+                (map-set liquidity-pools
+                    { token-x: (contract-of token-x), token-y: (contract-of token-y) }
+                    { reserve-x: (- reserve-x amount-x),
+                      reserve-y: (- reserve-y amount-y),
+                      total-shares: (- total-shares shares-to-burn) })
+                
+                ;; Transfer tokens back to user
+                (try! (as-contract (contract-call? token-x transfer 
+                    amount-x (as-contract tx-sender) tx-sender none)))
+                (try! (as-contract (contract-call? token-y transfer 
+                    amount-y (as-contract tx-sender) tx-sender none)))
+                
+                (ok { amount-x: amount-x, amount-y: amount-y })))))
