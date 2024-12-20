@@ -175,7 +175,7 @@
             pool-data (let (
                 (reserve-x (get reserve-x pool-data))
                 (reserve-y (get reserve-y pool-data)))
-                (ok (/ (* amount reserve-y) (* reserve-x u1000))))
+                (ok (/ (* amount reserve-y) reserve-x)))
             ERR_INVALID_PAIR)))
 
 ;; Public function to remove liquidity from a pool
