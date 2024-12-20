@@ -4,25 +4,12 @@
 ;; Define SIP-010 Fungible Token Interface
 (define-trait ft-trait
     (
-        ;; Transfer from the caller to a new principal
         (transfer (uint principal principal (optional (buff 34))) (response bool uint))
-
-        ;; Get the token balance of the specified principal
         (get-balance (principal) (response uint uint))
-
-        ;; Get the current total supply
         (get-total-supply () (response uint uint))
-
-        ;; Get the token name
         (get-name () (response (string-ascii 32) uint))
-
-        ;; Get the token symbol
         (get-symbol () (response (string-ascii 32) uint))
-
-        ;; Get the number of decimals
         (get-decimals () (response uint uint))
-
-        ;; Get the URI containing token metadata
         (get-token-uri () (response (optional (string-utf8 256)) uint))
     )
 )
@@ -33,6 +20,7 @@
 (define-constant ERR_INSUFFICIENT_BALANCE (err u1002))
 (define-constant ERR_INVALID_AMOUNT (err u1003))
 (define-constant ERR_INVALID_PAIR (err u1004))
+(define-constant MAX_UINT u340282366920938463463374607431768211455)
 
 ;; Data Variables
 (define-data-var total-supply uint u0)
@@ -59,77 +47,84 @@
         u0 
         (map-get? user-pool-shares { user: user, pool-id: { token-x: token-x, token-y: token-y }})))
 
+;; Private Functions
+(define-private (calculate-swap-output (input-amount uint) (input-reserve uint) (output-reserve uint))
+    (let ((input-amount-with-fee (* input-amount (- u1000 (var-get protocol-fee-rate)))))
+        (/ (* input-amount-with-fee output-reserve)
+           (* u1000 (+ input-reserve input-amount)))))
+
+(define-private (check-and-update-balance (user principal) (amount uint) (add bool))
+    (let ((current-balance (get-balance user)))
+        (if add
+            (if (> (+ current-balance amount) MAX_UINT)
+                ERR_INVALID_AMOUNT
+                (ok (+ current-balance amount)))
+            (if (> amount current-balance)
+                ERR_INSUFFICIENT_BALANCE
+                (ok (- current-balance amount))))))
+
 ;; Public Functions
 (define-public (deposit (amount uint))
-    (let ((current-balance (get-balance tx-sender)))
-        (begin
-            (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
-            (map-set balances 
-                tx-sender 
-                (+ current-balance amount))
+    (begin
+        (asserts! (> amount u0) ERR_INVALID_AMOUNT)
+        (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
+        (let ((new-balance (try! (check-and-update-balance tx-sender amount true))))
+            (map-set balances tx-sender new-balance)
             (var-set total-supply (+ (var-get total-supply) amount))
             (ok true))))
 
 (define-public (withdraw (amount uint))
-    (let ((current-balance (get-balance tx-sender)))
-        (if (<= amount current-balance)
-            (begin
-                (try! (as-contract (stx-transfer? amount (as-contract tx-sender) tx-sender)))
-                (map-set balances
-                    tx-sender
-                    (- current-balance amount))
-                (var-set total-supply (- (var-get total-supply) amount))
-                (ok true))
-            ERR_INSUFFICIENT_BALANCE)))
+    (begin
+        (asserts! (> amount u0) ERR_INVALID_AMOUNT)
+        (let ((new-balance (try! (check-and-update-balance tx-sender amount false))))
+            (try! (as-contract (stx-transfer? amount (as-contract tx-sender) tx-sender)))
+            (map-set balances tx-sender new-balance)
+            (var-set total-supply (- (var-get total-supply) amount))
+            (ok true))))
 
 (define-public (add-liquidity 
     (token-x <ft-trait>)
     (token-y <ft-trait>)
     (amount-x uint)
     (amount-y uint))
-    (let (
-        (pool (get-pool-info (contract-of token-x) (contract-of token-y)))
-        (shares u0))
-        (if (is-none pool)
-            ;; Create new pool
-            (begin
-                (try! (contract-call? token-x transfer amount-x tx-sender (as-contract tx-sender) none))
-                (try! (contract-call? token-y transfer amount-y tx-sender (as-contract tx-sender) none))
-                (map-set liquidity-pools
-                    { token-x: (contract-of token-x), token-y: (contract-of token-y) }
-                    { reserve-x: amount-x, reserve-y: amount-y, total-shares: amount-x })
-                (map-set user-pool-shares
-                    { user: tx-sender, pool-id: { token-x: (contract-of token-x), token-y: (contract-of token-y) }}
-                    amount-x)
-                (ok amount-x))
-            ;; Add to existing pool
-            (let ((pool-data (unwrap! pool ERR_INVALID_AMOUNT)))
-                (if (and
+    (begin
+        (asserts! (and (> amount-x u0) (> amount-y u0)) ERR_INVALID_AMOUNT)
+        (let (
+            (pool (get-pool-info (contract-of token-x) (contract-of token-y)))
+            (shares u0))
+            (if (is-none pool)
+                ;; Create new pool
+                (begin
+                    (try! (contract-call? token-x transfer amount-x tx-sender (as-contract tx-sender) none))
+                    (try! (contract-call? token-y transfer amount-y tx-sender (as-contract tx-sender) none))
+                    (map-set liquidity-pools
+                        { token-x: (contract-of token-x), token-y: (contract-of token-y) }
+                        { reserve-x: amount-x, reserve-y: amount-y, total-shares: amount-x })
+                    (map-set user-pool-shares
+                        { user: tx-sender, pool-id: { token-x: (contract-of token-x), token-y: (contract-of token-y) }}
+                        amount-x)
+                    (ok amount-x))
+                ;; Add to existing pool
+                (let ((pool-data (unwrap! pool ERR_INVALID_PAIR)))
+                    (asserts! (and
                         (>= (* amount-x (get reserve-y pool-data))
                             (* amount-y (get reserve-x pool-data)))
                         (<= (* amount-x (get reserve-y pool-data))
                             (* amount-y (get reserve-x pool-data))))
-                    (begin
-                        (try! (contract-call? token-x transfer amount-x tx-sender (as-contract tx-sender) none))
-                        (try! (contract-call? token-y transfer amount-y tx-sender (as-contract tx-sender) none))
-                        (let ((new-shares (/ (* amount-x (get total-shares pool-data))
-                                           (get reserve-x pool-data))))
-                            (map-set liquidity-pools
-                                { token-x: (contract-of token-x), token-y: (contract-of token-y) }
-                                { reserve-x: (+ (get reserve-x pool-data) amount-x),
-                                  reserve-y: (+ (get reserve-y pool-data) amount-y),
-                                  total-shares: (+ (get total-shares pool-data) new-shares) })
-                            (map-set user-pool-shares
-                                { user: tx-sender, pool-id: { token-x: (contract-of token-x), token-y: (contract-of token-y) }}
-                                (+ (get-user-pool-shares tx-sender (contract-of token-x) (contract-of token-y)) new-shares))
-                            (ok new-shares)))
-                    ERR_INVALID_AMOUNT)))))
-
-;; Private Functions
-(define-private (calculate-swap-output (input-amount uint) (input-reserve uint) (output-reserve uint))
-    (let ((input-amount-with-fee (* input-amount (- u1000 (var-get protocol-fee-rate)))))
-        (/ (* input-amount-with-fee output-reserve)
-           (* u1000 (+ input-reserve input-amount)))))
+                        ERR_INVALID_AMOUNT)
+                    (try! (contract-call? token-x transfer amount-x tx-sender (as-contract tx-sender) none))
+                    (try! (contract-call? token-y transfer amount-y tx-sender (as-contract tx-sender) none))
+                    (let ((new-shares (/ (* amount-x (get total-shares pool-data))
+                                       (get reserve-x pool-data))))
+                        (map-set liquidity-pools
+                            { token-x: (contract-of token-x), token-y: (contract-of token-y) }
+                            { reserve-x: (+ (get reserve-x pool-data) amount-x),
+                              reserve-y: (+ (get reserve-y pool-data) amount-y),
+                              total-shares: (+ (get total-shares pool-data) new-shares) })
+                        (map-set user-pool-shares
+                            { user: tx-sender, pool-id: { token-x: (contract-of token-x), token-y: (contract-of token-y) }}
+                            (+ (get-user-pool-shares tx-sender (contract-of token-x) (contract-of token-y)) new-shares))
+                        (ok new-shares)))))))
 
 ;; Admin Functions
 (define-public (set-protocol-fee (new-fee-rate uint))
